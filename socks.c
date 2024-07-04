@@ -19,9 +19,13 @@
 #define IPV4_SIZE 4
 #define IPV6_SIZE 16
 
+char* socks_password;
+char* socks_username;
+
 int daemon_mode = 0;
 int support_socks4 = 0;
 int quiet = 0; // if 1, then does not show the message
+
 FILE *log_file;
 pthread_mutex_t lock;
 
@@ -104,10 +108,19 @@ void socks_initiation(int fd, int* version, int* methods){
   *methods = data[1];
 }
 
-void socks_send_default_auth(int fd, int auth_code){
+void socks_send_auth_replie(int fd, int auth_code){
   char answer[2] = { VERSION5, auth_code };
   nwrite(fd, (void*) answer, sizeof(answer));
   log_message("Auth %hhX %hhX", answer[0], answer[1]);
+}
+
+char* socks_read_data(int fd) {
+  unsigned char s;
+  nread(fd, &s, sizeof(s));
+  char* data = (char*) malloc(s + 1);
+  nread(fd, data, s);
+  data[s] = 0;
+  return data;
 }
 
 void socks5_auth(int fd, int methods) {
@@ -120,16 +133,34 @@ void socks5_auth(int fd, int methods) {
 
   switch (auth_method) {
     case NOAUTH: {
-      socks_send_default_auth(fd, NOAUTH);
+      socks_send_auth_replie(fd, NOAUTH);
       break;
     }
-    case USERPASS:{
-      // User/Pass authentication can be implemented here
+    case USERPASS: {
+      socks_send_auth_replie(fd, USERPASS);
+      unsigned char ver;
+      nread(fd, &ver, sizeof(ver));
+      log_message("Auth ver: %hhX", ver);
+      char* username = socks_read_data(fd);
+      char* password = socks_read_data(fd);
+      log_message("username: %s password: %s", username, password);
+      if (!strcmp(socks_username, username) && !strcmp(socks_password, password)) {
+        char answer[] = { VERSION5, OK };
+        nwrite(fd, answer, sizeof(answer));
+        free(username);
+        free(password);
+      } else {
+        char answer[] = { VERSION5, FAILED };
+        nwrite(fd, answer, sizeof(answer));
+        free(username);
+        free(password);
+        socks_thread_exit(fd);
+      }
       break;
     }
     default:
       log_message("auth failed");
-      socks_send_default_auth(fd, NOMETHOD);
+      socks_send_auth_replie(fd, NOMETHOD);
       socks_thread_exit(fd);
   }
 }
@@ -162,16 +193,6 @@ char* socks_get_ip(int fd, unsigned type_size) {
     //TODO Handle IPv6 address logging
   }
   return ip;
-}
-
-char* socks_get_domain(int fd, unsigned char* size){
-  unsigned char s;
-  nread(fd, &s, sizeof(s));
-  char* domain = (char*) malloc(s + 1);
-  nread(fd, domain, s);
-  domain[s] = 0;
-  *size = s;
-  return domain;
 }
 
 unsigned short socks_get_port(int fd){
@@ -314,7 +335,7 @@ void* thread_process(void* fd) {
             }
             case DOMAIN:{
               address_t dest_addr;
-              dest_addr.addr = socks_get_domain(net_fd, &dest_addr.size);
+              dest_addr.addr = socks_read_data(net_fd);
               dest_addr.port = socks_get_port(net_fd);
               inet_fd = socks_connect_domain(&dest_addr);
               if (inet_fd < 0) {
