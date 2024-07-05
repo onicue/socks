@@ -25,6 +25,7 @@ char* socks_username;
 int daemon_mode = 0;
 int support_socks4 = 0;
 int quiet = 0; // if 1, then does not show the message
+int support_ipv6 = 1;
 
 FILE *log_file;
 pthread_mutex_t lock;
@@ -250,22 +251,49 @@ int socks_connect_ipv4(address_t* dest_addr){
 
   fd = socket(AF_INET, SOCK_STREAM, 0);
   if (connect(fd, (struct sockaddr*)&remote, sizeof(remote)) < 0) {
-    log_message("Error while connecting in function socks_connect");
+    log_message("Error while connecting in function socks_connect_ipv4");
     close(fd);
     return -1;
   }
   return fd;
 }
 
-void socks_send_replies(int fd, int rep, int atype, address_t addr){
+int socks_connect_ipv6(address_t* dest_addr) {
+  int fd;
+  struct sockaddr_in6 remote;
+  memset(&remote, 0, sizeof(remote));
+  remote.sin6_family = AF_INET6;
+  memcpy(&remote.sin6_addr, dest_addr->addr, IPV6_SIZE);
+  remote.sin6_port = htons(dest_addr->port);
+
+  fd = socket(AF_INET6, SOCK_STREAM, 0);
+  if (connect(fd, (struct sockaddr *)&remote, sizeof(remote))) {
+    log_message("Error while connecting in function socks_connect_ipv6");
+    close(fd);
+    return -1;
+  }
+  return fd;
+}
+
+void socks_send_replies(int fd, int rep, int atype, address_t* addr){
   char replies[4] = { VERSION5, rep, RESERVED, atype };
   nwrite(fd, replies, sizeof(replies));
   if ( atype == DOMAIN ) {
-    nwrite(fd, &addr.size, sizeof(addr.size));
+    nwrite(fd, &addr->size, sizeof(addr->size));
   }
-  nwrite(fd, addr.addr, addr.size);
-  nwrite(fd, &addr.port, sizeof(addr.port));
+  nwrite(fd, addr->addr, addr->size);
+  nwrite(fd, &addr->port, sizeof(addr->port));
   log_message("Replies %hhX %hhX %hhX %hhX", replies[0], replies[1], replies[2], replies[3]);
+}
+
+void socks5_check_and_answer(int net_fd, int inet_fd, int atype, address_t* dest_addr){
+  if (inet_fd < 0) {
+    socks_send_replies(net_fd, FAILED, atype, dest_addr);
+    free(dest_addr->addr);
+    socks_thread_exit(net_fd);
+  }
+  socks_send_replies(net_fd, OK, atype, dest_addr);
+  free(dest_addr->addr);
 }
 
 void socket_pipe(int fd0, int fd1)
@@ -324,13 +352,7 @@ void* thread_process(void* fd) {
               };
 
               inet_fd = socks_connect_ipv4(&dest_addr);
-              if (inet_fd < 0) {
-                socks_send_replies(net_fd, FAILED, IPV4, dest_addr);
-                free(dest_addr.addr);
-                socks_thread_exit(net_fd);
-              }
-              socks_send_replies(net_fd, OK, IPV4, dest_addr);
-              free(dest_addr.addr);
+              socks5_check_and_answer(net_fd, inet_fd, IPV4, &dest_addr);
               break;
             }
             case DOMAIN:{
@@ -338,15 +360,22 @@ void* thread_process(void* fd) {
               dest_addr.addr = socks_read_data(net_fd);
               dest_addr.port = socks_get_port(net_fd);
               inet_fd = socks_connect_domain(&dest_addr);
-              if (inet_fd < 0) {
-                socks_send_replies(net_fd, FAILED, DOMAIN, dest_addr);
-                free(dest_addr.addr);
+              socks5_check_and_answer(net_fd, inet_fd, DOMAIN, &dest_addr);
+              break;
+            }
+            case IPV6: {
+              if(!support_ipv6){
                 socks_thread_exit(net_fd);
               }
-              socks_send_replies(net_fd, OK, DOMAIN, dest_addr);
-              free(dest_addr.addr);
+              address_t dest_addr = {
+                .size = IPV6_SIZE,
+                .addr = socks_get_ip(net_fd, IPV6_SIZE),
+                .port = socks_get_port(net_fd)
+              };
+              inet_fd = socks_connect_ipv6(&dest_addr);
+              socks5_check_and_answer(net_fd, inet_fd, IPV6, &dest_addr);
               break;
-            };
+            }
             default:
               log_message("Address type not supported");
               socks_thread_exit(net_fd);
