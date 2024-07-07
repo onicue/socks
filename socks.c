@@ -12,6 +12,7 @@
 #include <errno.h>
 #include <netinet/tcp.h>
 #include <signal.h>
+#include <getopt.h>
 #include "socks_info.h"
 
 #define BUFSIZE 65536
@@ -24,8 +25,9 @@ char* socks_username;
 
 int daemon_mode = 0;
 int support_socks4 = 0;
-int quiet = 0; // if 1, then does not show the message
-int support_ipv6 = 1;
+int silent = 0; // if 1, then does not show the message
+int no_ipv6 = 0;
+int auth_mode = 1;
 
 FILE *log_file;
 pthread_mutex_t lock;
@@ -41,7 +43,7 @@ typedef struct {
 
 void log_message(const char *message, ...)
 {
-  if (quiet){
+  if (silent){
     return;
   }
 
@@ -364,7 +366,8 @@ void* thread_process(void* fd) {
               break;
             }
             case IPV6: {
-              if(!support_ipv6){
+              if(no_ipv6){
+                log_message("IPv6 not supported");
                 socks_thread_exit(net_fd);
               }
               address_t dest_addr = {
@@ -458,10 +461,96 @@ void thread_handling() {
   }
 }
 
-int main(){
+void set_auth_mode(){
+  if(!auth_mode)
+    auth_mode = 1;
+}
+
+void print_usage(){
+  printf("Usage: socks [options]\n");
+  printf("Options:\n");
+  printf("  -h, --help              Show this help message\n");
+  printf("  -f, --file FILE         Specify the file for log message (default is stdout)\n");
+  printf("  -p, --port PORT         Specify the port\n");
+  printf("  -s, --silent            Disable log message\n");
+  printf("      --no-ipv6           Disable IPv6\n");
+  printf("  -A, --no-auth           Disable authentication\n");
+  printf("The following options enable authentication:\n");
+  printf("  -u, --username USER     Specify username (default is \"username\")\n");
+  printf("  -w, --password PASS     Specify password (default is \"password\")\n");
+  printf("  -S, --secret            Enter password\n");
+  printf("  -a, --auth              Enable authentication\n");
+}
+
+int main(int argc, char* argv[]){
+  int opt, opt_index = 0;
   log_file = stdout;
+  socks_username = "username";
+  socks_password = "password";
   pthread_mutex_init(&lock, NULL);
   signal(SIGPIPE, SIG_IGN);
+
+  struct option options[] = {
+    {"help", no_argument, 0, 'h'},
+    {"file", required_argument, 0, 'f'},
+    {"port", required_argument, 0, 'p'},
+    {"silent", no_argument, 0, 's'},
+    {"no-ipv6", no_argument, &no_ipv6, 1},
+    {"username", required_argument, 0, 'u'},
+    {"password", required_argument, 0, 'w'},
+    {"secret", no_argument, 0, 'S'},
+    {"auth", no_argument, 0, 'a'},
+    {"no-auth", no_argument, 0, 'A'}
+  };
+
+  while ((opt = getopt_long(argc, argv, "hf:p:su:w:SaA", options, &opt_index)) != -1) {
+    switch (opt) {
+      case 'h':
+        print_usage();
+        return 0;
+      case 'f':
+        log_file = fopen(optarg, "w");
+        if (log_file == NULL) {
+          perror("Error opening file");
+          return 1;
+        }
+        break;
+      case 'p':
+        port = atoi(optarg);
+        break;
+      case 's':
+        silent = 1;
+        break;
+      case 'u':
+        socks_username = optarg;
+        auth_mode = 1;
+        break;
+      case 'w':
+        socks_password = optarg;
+        auth_mode = 1;
+        break;
+      case'S':
+        printf("Enter password: ");
+        socks_password = getpass("");
+        auth_mode = 1;
+        break;
+      case 'a':
+        auth_mode = 1;
+        break;
+      case 'A':
+        auth_mode = 0;
+        break;
+      default:
+        print_usage();
+        return 1;
+    }
+  }
+
+
   thread_handling();
+
+  if(log_file != stdout) {
+    fclose(log_file);
+  }
   return 0;
 }
