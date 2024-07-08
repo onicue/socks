@@ -27,7 +27,7 @@ int daemon_mode = 0;
 int support_socks4 = 0;
 int silent = 0; // if 1, then does not show the message
 int no_ipv6 = 0;
-int auth_mode = 1;
+int auth_method = NOAUTH;
 
 FILE *log_file;
 pthread_mutex_t lock;
@@ -127,11 +127,19 @@ char* socks_read_data(int fd) {
 }
 
 void socks5_auth(int fd, int methods) {
-  int auth_method = NOAUTH;
+  int support_auth = 0;
   for (int i = 0; i < methods; i++) {
     char method;
     nread(fd, (void*)&method, 1);
     log_message("Method AUTH %hhX", method);
+    if (method == auth_method) {
+      support_auth = 1;
+    }
+  }
+
+  if (!support_auth) {
+    log_message("Authentication not supported");
+    socks_thread_exit(fd);
   }
 
   switch (auth_method) {
@@ -462,8 +470,8 @@ void thread_handling() {
 }
 
 void set_auth_mode(){
-  if(!auth_mode)
-    auth_mode = 1;
+  if(!auth_method)
+    auth_method = 1;
 }
 
 void print_usage(){
@@ -471,7 +479,7 @@ void print_usage(){
   printf("Options:\n");
   printf("  -h, --help              Show this help message\n");
   printf("  -f, --file FILE         Specify the file for log message (default is stdout)\n");
-  printf("  -p, --port PORT         Specify the port\n");
+  printf("  -p, --port PORT         Specify the port (default is 8080)\n");
   printf("  -s, --silent            Disable log message\n");
   printf("      --no-ipv6           Disable IPv6\n");
   printf("  -A, --no-auth           Disable authentication\n");
@@ -523,22 +531,22 @@ int main(int argc, char* argv[]){
         break;
       case 'u':
         socks_username = optarg;
-        auth_mode = 1;
+        auth_method = USERPASS;
         break;
       case 'w':
         socks_password = optarg;
-        auth_mode = 1;
+        auth_method = USERPASS;
         break;
       case'S':
         printf("Enter password: ");
         socks_password = getpass("");
-        auth_mode = 1;
+        auth_method = USERPASS;
         break;
       case 'a':
-        auth_mode = 1;
+        auth_method = USERPASS;
         break;
       case 'A':
-        auth_mode = 0;
+        auth_method = NOAUTH;
         break;
       default:
         print_usage();
