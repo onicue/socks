@@ -1,3 +1,6 @@
+#ifndef SOCKS_INFO
+#define SOCKS_INFO
+
 #define RESERVED 0x00
 
 enum SOCKS {
@@ -47,3 +50,4 @@ enum socks_rep {
   /*addr_type_not_supported = 0x08, //Address type not supported*/
   /*ff_unassigned = 0x09 //to X'FF' unassigned*/
 };
+#endif
