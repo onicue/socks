@@ -638,7 +638,7 @@ int main(int argc, char* argv[]){
         auth_method = USERPASS;
         break;
       case'S':
-        socks_password = getpass("Enter password:");
+        socks_password = strdup(getpass("Enter password:"));
         auth_method = USERPASS;
         break;
       case 'a':
@@ -674,6 +674,8 @@ int main(int argc, char* argv[]){
 
   thread_handling();
 
+  free(socks_username);
+  free(socks_password);
   if(log_file != stdout) {
     fclose(log_file);
   }
