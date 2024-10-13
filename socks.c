@@ -38,6 +38,7 @@ int listen_n = 30;  // max connections
 int support_socks4 = 0;
 int silent = 0; // if 1, then does not show the message
 int no_ipv6 = 0;
+int no_socks4 = 0;
 int auth_method = NOAUTH;
 int colorful_log = 0;
 
@@ -412,9 +413,9 @@ void* thread_process(void* fd) {
               address_t dest_addr = {
                 .atype = IPV4,
                 .size = IPV4_SIZE,
-                .addr = socks_get_ip(net_fd, IPV4_SIZE),
-                .port = socks_get_port(net_fd)
               };
+              dest_addr.addr = socks_get_ip(net_fd, IPV4_SIZE);
+              dest_addr.port = socks_get_port(net_fd);
 
               inet_fd = socks_connect_ipv4(&dest_addr);
               socks5_check_and_answer(net_fd, inet_fd, &dest_addr);
@@ -423,9 +424,10 @@ void* thread_process(void* fd) {
             case DOMAIN:{
               address_t dest_addr = {
                 .atype = DOMAIN,
-                .addr = socks_read_data(net_fd),
-                .port = socks_get_port(net_fd)
               };
+              dest_addr.addr = socks_read_data(net_fd);
+              dest_addr.port = socks_get_port(net_fd);
+
               inet_fd = socks_connect_domain(&dest_addr);
               socks5_check_and_answer(net_fd, inet_fd, &dest_addr);
               break;
@@ -438,9 +440,10 @@ void* thread_process(void* fd) {
               address_t dest_addr = {
                 .atype = IPV6,
                 .size = IPV6_SIZE,
-                .addr = socks_get_ip(net_fd, IPV6_SIZE),
-                .port = socks_get_port(net_fd)
               };
+              dest_addr.addr = socks_get_ip(net_fd, IPV6_SIZE);
+              dest_addr.port = socks_get_port(net_fd);
+
               inet_fd = socks_connect_ipv6(&dest_addr);
               socks5_check_and_answer(net_fd, inet_fd, &dest_addr);
               break;
@@ -457,14 +460,18 @@ void* thread_process(void* fd) {
       }
       break;
     case VERSION4:{
+      if(no_socks4){
+        log_info("SOCKS4 not supported");
+        socks_thread_exit(net_fd);
+      }
       if (methods != 1) {
         log_error("unsupported command");
       } else {
         char ident[255];
-        address_t dest_addr = {
-          .port = socks_get_port(net_fd),
-          .addr = socks_get_ip(net_fd, IPV4_SIZE)
-        };
+        address_t dest_addr;
+        dest_addr.port = socks_get_port(net_fd);
+        dest_addr.addr = socks_get_ip(net_fd, IPV4_SIZE);
+
         socks4_read_n(net_fd, ident, sizeof(ident));
 
         if (is_socks4a(dest_addr.addr)) {
@@ -568,7 +575,8 @@ void print_usage(){
   printf("  -f, --file FILE         Specify the file for log message (default is stdout)\n");
   printf("  -p, --port PORT         Specify the port (default is 8080)\n");
   printf("  -s, --silent            Disable log message\n");
-  printf("      --no-ipv6           Disable IPv6\n");
+  printf("  -n, --no-ipv6           Disable IPv6\n");
+  printf("  -N, --no-socks4         Disable socks4 support\n");
   printf("  -A, --no-auth           Disable authentication\n");
   printf("  -C, --colorful          Enable colorful logs\n");
   printf("  -c, --connection        Set maximum connections\n");
@@ -592,7 +600,8 @@ int main(int argc, char* argv[]){
     {"file", required_argument, 0, 'f'},
     {"port", required_argument, 0, 'p'},
     {"silent", no_argument, 0, 's'},
-    {"no-ipv6", no_argument, &no_ipv6, 1},
+    {"no-ipv6", no_argument, 0, 'n'},
+    {"no-socks4", no_argument, 0, 'N'},
     {"username", required_argument, 0, 'u'},
     {"password", required_argument, 0, 'w'},
     {"secret", no_argument, 0, 'S'},
@@ -602,7 +611,7 @@ int main(int argc, char* argv[]){
     {"connection", required_argument, 0, 'c'}
   };
 
-  while ((opt = getopt_long(argc, argv, "hf:p:su:w:SaACc:", options, &opt_index)) != -1) {
+  while ((opt = getopt_long(argc, argv, "hf:p:su:w:SaACc:nN", options, &opt_index)) != -1) {
     switch (opt) {
       case 'h':
         print_usage();
@@ -643,6 +652,12 @@ int main(int argc, char* argv[]){
         break;
       case 'c':
         listen_n = atoi(optarg);
+        break;
+      case 'n':
+        no_ipv6 = 1;
+        break;
+      case 'N':
+        no_socks4 = 1;
         break;
       default:
         print_usage();
