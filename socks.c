@@ -14,7 +14,7 @@
 #include <signal.h>
 #include <getopt.h>
 #include "socks_info.h"
-#include "config.h"
+
 #define BUFSIZE 65536
 
 #define IPV4_SIZE 4
@@ -22,6 +22,24 @@
 
 #define log_info(...) log_message(1, __VA_ARGS__)
 #define log_error(...) log_message(0, __VA_ARGS__)
+
+// Default config
+
+#define COLOR_ERROR "\033[31m"
+#define COLOR_INFO  "\033[37m"
+#define COLOR_CRITICAL "\033[31m"
+#define COLOR_RESET "\033[0m"
+
+char* socks_password = NULL;
+char* socks_username = NULL;
+
+unsigned short port = 8080; // default port
+int listen_n = 30;  // max connections
+int support_socks4 = 0;
+int silent = 0; // if 1, then does not show the message
+int no_ipv6 = 0;
+int auth_method = NOAUTH;
+int colorful_log = 0;
 
 char* color_error = "";
 char* color_info = "";
@@ -35,6 +53,7 @@ typedef struct {
   char* addr;
   unsigned char size;
   unsigned short port;
+  int atype;
 } address_t;
 
 void log_message(int level, const char *message, ...)
@@ -130,6 +149,23 @@ char* socks_read_data(int fd) {
   return data;
 }
 
+void socks4_read_n(int fd, char* buf, int size){
+  char ch = 0;
+  for(int i = 0; i < size; ++i){
+    nread(fd, &ch, sizeof(ch));
+    buf[i] = ch;
+
+    if (!ch) {
+      break;
+    }
+  }
+}
+
+void socks4_send_response(int fd, int status) {
+  char resp[8] = {0x00, (char)status, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+  nwrite(fd, (void*) resp, sizeof(resp));
+}
+
 void socks5_auth(int fd, int methods) {
   int support_auth = 0;
   for (int i = 0; i < methods; i++) {
@@ -202,16 +238,20 @@ char* socks_get_ip(int fd, unsigned type_size) {
     free(ip);
     socks_thread_exit(fd);
   }
-  if (type_size == IPV4_SIZE) {
-    log_info("IP %hhu.%hhu.%hhu.%hhu", ip[0], ip[1], ip[2], ip[3]);
-  } else if(type_size == IPV6_SIZE){
-    char ip_str[INET6_ADDRSTRLEN];
-    if (inet_ntop(AF_INET6, ip, ip_str, sizeof(ip_str)) != NULL) {
-      log_info("IP [%s]", ip_str);
-    } else {
-      log_error("Failed to convert IPv6 address to string");
+
+  if (!silent) {
+    if (type_size == IPV4_SIZE) {
+      log_info("IP %hhu.%hhu.%hhu.%hhu", ip[0], ip[1], ip[2], ip[3]);
+    } else if(type_size == IPV6_SIZE){
+      char ip_str[INET6_ADDRSTRLEN];
+      if (inet_ntop(AF_INET6, ip, ip_str, sizeof(ip_str)) != NULL) {
+        log_info("IP [%s]", ip_str);
+      } else {
+        log_error("Failed to convert IPv6 address to string");
+      }
     }
   }
+
   return ip;
 }
 
@@ -265,7 +305,7 @@ int socks_connect_ipv4(address_t* dest_addr){
   struct sockaddr_in remote;
   memset(&remote, 0, sizeof(remote));
   remote.sin_family = AF_INET;
-  memcpy(&remote.sin_addr.s_addr, dest_addr->addr, IPV4_SIZE);
+  remote.sin_addr.s_addr = inet_addr(dest_addr->addr);
   remote.sin_port = htons(dest_addr->port);
 
   fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -294,10 +334,10 @@ int socks_connect_ipv6(address_t* dest_addr) {
   return fd;
 }
 
-void socks_send_replies(int fd, int rep, int atype, address_t* addr){
-  char replies[4] = { VERSION5, rep, RESERVED, atype };
+void socks_send_replies(int fd, int rep, address_t* addr){
+  char replies[4] = { VERSION5, rep, RESERVED, addr->atype };
   nwrite(fd, replies, sizeof(replies));
-  if ( atype == DOMAIN ) {
+  if ( addr->atype == DOMAIN ) {
     nwrite(fd, &addr->size, sizeof(addr->size));
   }
   nwrite(fd, addr->addr, addr->size);
@@ -305,14 +345,19 @@ void socks_send_replies(int fd, int rep, int atype, address_t* addr){
   log_info("Replies %hhX %hhX %hhX %hhX", replies[0], replies[1], replies[2], replies[3]);
 }
 
-void socks5_check_and_answer(int net_fd, int inet_fd, int atype, address_t* dest_addr){
+void socks5_check_and_answer(int net_fd, int inet_fd, address_t* dest_addr){
   if (inet_fd < 0) {
-    socks_send_replies(net_fd, FAILED, atype, dest_addr);
+    socks_send_replies(net_fd, FAILED, dest_addr);
     free(dest_addr->addr);
     socks_thread_exit(net_fd);
   }
-  socks_send_replies(net_fd, OK, atype, dest_addr);
+  socks_send_replies(net_fd, OK, dest_addr);
   free(dest_addr->addr);
+}
+
+int is_socks4a(char *ip)
+{
+  return (ip[0] == 0 && ip[1] == 0 && ip[2] == 0 && ip[3] != 0);
 }
 
 void socket_pipe(int fd0, int fd1)
@@ -365,21 +410,24 @@ void* thread_process(void* fd) {
           switch (atype) {
             case IPV4:{
               address_t dest_addr = {
+                .atype = IPV4,
                 .size = IPV4_SIZE,
                 .addr = socks_get_ip(net_fd, IPV4_SIZE),
                 .port = socks_get_port(net_fd)
               };
 
               inet_fd = socks_connect_ipv4(&dest_addr);
-              socks5_check_and_answer(net_fd, inet_fd, IPV4, &dest_addr);
+              socks5_check_and_answer(net_fd, inet_fd, &dest_addr);
               break;
             }
             case DOMAIN:{
-              address_t dest_addr;
-              dest_addr.addr = socks_read_data(net_fd);
-              dest_addr.port = socks_get_port(net_fd);
+              address_t dest_addr = {
+                .atype = DOMAIN,
+                .addr = socks_read_data(net_fd),
+                .port = socks_get_port(net_fd)
+              };
               inet_fd = socks_connect_domain(&dest_addr);
-              socks5_check_and_answer(net_fd, inet_fd, DOMAIN, &dest_addr);
+              socks5_check_and_answer(net_fd, inet_fd, &dest_addr);
               break;
             }
             case IPV6: {
@@ -388,20 +436,19 @@ void* thread_process(void* fd) {
                 socks_thread_exit(net_fd);
               }
               address_t dest_addr = {
+                .atype = IPV6,
                 .size = IPV6_SIZE,
                 .addr = socks_get_ip(net_fd, IPV6_SIZE),
                 .port = socks_get_port(net_fd)
               };
               inet_fd = socks_connect_ipv6(&dest_addr);
-              socks5_check_and_answer(net_fd, inet_fd, IPV6, &dest_addr);
+              socks5_check_and_answer(net_fd, inet_fd, &dest_addr);
               break;
             }
             default:
               log_error("address type not supported");
               socks_thread_exit(net_fd);
           }
-          socket_pipe(inet_fd, net_fd);
-          close(inet_fd);
           break;
         }
         default:
@@ -410,17 +457,44 @@ void* thread_process(void* fd) {
       }
       break;
     case VERSION4:{
-      if(!support_socks4) {
-        log_error("SOCKS4 not supported");
-        break;
-      }
+      if (methods != 1) {
+        log_error("unsupported command");
+      } else {
+        char ident[255];
+        address_t dest_addr = {
+          .port = socks_get_port(net_fd),
+          .addr = socks_get_ip(net_fd, IPV4_SIZE)
+        };
+        socks4_read_n(net_fd, ident, sizeof(ident));
 
+        if (is_socks4a(dest_addr.addr)) {
+          char domain[255];
+          socks4_read_n(net_fd, domain, sizeof(domain));
+          log_info("socks4 ident:%s domain:%s", ident, domain);
+          inet_fd = socks_connect_domain(&(address_t){.addr = domain, .port = dest_addr.port });
+        } else {
+          log_info("socks4 connecting");
+          inet_fd = socks_connect_ipv4(&dest_addr);
+        }
+
+        if (-1 < inet_fd) {
+          socks4_send_response(net_fd, 0x5a);
+          free(dest_addr.addr);
+        } else {
+          socks4_send_response(net_fd, 0x5b);
+          free(dest_addr.addr);
+          socks_thread_exit(net_fd);
+        }
+      }
+      break;
     }
     default:
       log_error("incorrect version");
       socks_thread_exit(net_fd);
   }
 
+  socket_pipe(inet_fd, net_fd);
+  close(inet_fd);
   socks_thread_exit(net_fd);
   return NULL;
 }
@@ -450,7 +524,7 @@ void thread_handling() {
   }
 
   address.sin_family = AF_INET;
-  address.sin_addr.s_addr = INADDR_ANY;
+  address.sin_addr.s_addr = htonl(INADDR_ANY);
   address.sin_port = htons(port);
 
   if (bind(server_fd, (struct sockaddr*)&address, addrlen) < 0) {
@@ -497,6 +571,7 @@ void print_usage(){
   printf("      --no-ipv6           Disable IPv6\n");
   printf("  -A, --no-auth           Disable authentication\n");
   printf("  -C, --colorful          Enable colorful logs\n");
+  printf("  -c, --connection        Set maximum connections\n");
   printf("The following options enable authentication:\n");
   printf("  -u, --username USER     Specify username (default is \"username\")\n");
   printf("  -w, --password PASS     Specify password (default is \"password\")\n");
@@ -523,10 +598,11 @@ int main(int argc, char* argv[]){
     {"secret", no_argument, 0, 'S'},
     {"auth", no_argument, 0, 'a'},
     {"no-auth", no_argument, 0, 'A'},
-    {"colorful", no_argument, 0, 'C'}
+    {"colorful", no_argument, 0, 'C'},
+    {"connection", required_argument, 0, 'c'}
   };
 
-  while ((opt = getopt_long(argc, argv, "hf:p:su:w:SaAC", options, &opt_index)) != -1) {
+  while ((opt = getopt_long(argc, argv, "hf:p:su:w:SaACc:", options, &opt_index)) != -1) {
     switch (opt) {
       case 'h':
         print_usage();
@@ -545,16 +621,15 @@ int main(int argc, char* argv[]){
         silent = 1;
         break;
       case 'u':
-        socks_username = optarg;
+        socks_username = strdup(optarg);
         auth_method = USERPASS;
         break;
       case 'w':
-        socks_password = optarg;
+        socks_password = strdup(optarg);
         auth_method = USERPASS;
         break;
       case'S':
-        printf("Enter password: ");
-        socks_password = getpass("");
+        socks_password = getpass("Enter password:");
         auth_method = USERPASS;
         break;
       case 'a':
@@ -565,6 +640,9 @@ int main(int argc, char* argv[]){
         break;
       case 'C':
         colorful_log = 1;
+        break;
+      case 'c':
+        listen_n = atoi(optarg);
         break;
       default:
         print_usage();
